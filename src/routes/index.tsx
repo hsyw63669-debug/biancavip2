@@ -57,6 +57,8 @@ const localizedProfileText:Record<string,string>={
  IT:"Ciao, sono Bianca Souza. Benvenuto nel mio piccolo angolo ❤️",
  PT:"Olá, sou a Mika. Bem-vindo ao meu cantinho ❤️"
 };
+// Adicionado: estava referenciado em localizeProfileDom mas não definido (evita erro do TypeScript).
+const localizedUi:Record<string,Record<string,string>>={};
 const localizedUiExtra:Record<string,Record<string,string>>={
  EN:{"Videochamada exclusiva":"Exclusive video call","Vídeo personalizado":"Personalized video","Adicione por mais":"Add for","R$":"R$","Valor inválido.":"Invalid amount.","Não foi possível copiar automaticamente. Selecione o código e copie manualmente.":"Could not copy automatically. Select the code and copy it manually."},
  ES:{"Videochamada exclusiva":"Videollamada exclusiva","Vídeo personalizado":"Vídeo personalizado","Adicione por mais":"Añadir por","R$":"R$","Valor inválido.":"Importe no válido.","Não foi possível copiar automaticamente. Selecione o código e copie manualmente.":"No se pudo copiar automáticamente. Selecciona el código y cópialo manualmente."},
@@ -758,4 +760,16 @@ function CountryGate({onContinue}:{onContinue:(code:string)=>void}){
  return <div className="fixed inset-0 z-[100] flex min-h-[100svh] items-center justify-center overflow-y-auto bg-black/35 p-4 backdrop-blur-md sm:p-6">
   <div className="absolute inset-0 bg-white/10"/>
   <div className="relative z-10 w-full max-w-[390px] overflow-hidden rounded-[28px] border border-white/50 bg-white/95 p-6 text-center shadow-[0_24px_80px_rgba(0,0,0,.28)] sm:p-7">
-   <div className="mx-aut
+   <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-[#fff0e8] text-[#ff6a2d]"><Globe size={28}/></div>
+   <h2 className="text-[22px] font-extrabold text-[#17191d]">{lang.chooseCountry}</h2>
+   <p className="mt-2 text-sm leading-5 text-[#68707b]">{lang.chooseCountryText}</p>
+   <div className="mt-5">
+    <select value={selected} onChange={e=>setSelected(e.target.value)} aria-label={lang.selectCountry} className="h-12 w-full rounded-xl border border-black/10 bg-white px-3 text-sm font-medium outline-none">
+     <option value="">{lang.selectCountry}</option>
+     {countries.map(c=><option key={c[0]} value={c[0]}>{c[1]} {countryLabel(c[0],langForCountry(selected||"EN"))}</option>)}
+    </select>
+   </div>
+   <button type="button" onClick={continueFromGate} disabled={!selected} className="mt-4 h-12 w-full rounded-xl bg-[#ff6a2d] font-bold text-white disabled:opacity-40">{lang.continue}</button>
+  </div>
+ </div>
+}
