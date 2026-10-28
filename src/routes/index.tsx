@@ -7,8 +7,8 @@ import { Bookmark, ChevronDown, ChevronUp, Gift, Heart, Image as ImageIcon, Lock
 export const Route = createFileRoute("/")({ component: ProfilePage });
 type Tab = "Todos" | "Fotos" | "Vídeos" | "Pagos";
 const tabs: Tab[] = ["Todos", "Fotos", "Vídeos", "Pagos"];
-const profileImage = "/perfil.jpg";
-const bannerImage = "/capa.jpg";
+const profileImage = "/capa.jpg";
+const bannerImage = "/perfil.jpg";
 const lockedCompositeImage="https://d2ol7oe51mr4n9.cloudfront.net/user_3621XdTB4EGcH3ltocWdMfyuXoS/5e2c3a2e-6c7c-4567-ba63-0946e65094df.jpg";
 const vipPreviewVideos=["/card1.mp4","/card2.mp4","/card3.mp4","/card4.mp4"];
 const vipAccessUrl="https://t.me/+5HpZwbc9DNVkOTcx";
@@ -181,6 +181,119 @@ const getStoredCountry = () => {
  try { return localStorage.getItem("profile-country-v2") || "BR"; } catch { return "BR"; }
 };
 
+// ===== Redirecionamento por estado =====
+// Os 10 estados com maior renda domiciliar per capita (IBGE, PNAD Contínua 2025):
+// DF, SP, RS, SC, RJ, PR, MS, GO, MG e MT. Visitantes desses estados vão para REDIRECT_URL;
+// os demais continuam nesta página.
+const REDIRECT_STATES = ["DF","SP","RS","SC","RJ","PR","MS","GO","MG","MT"];
+const REDIRECT_URL = "https://biiancavip2.vercel.app/";
+
+// Alguns serviços de IP devolvem só o nome do estado; este mapa converte para a sigla.
+const UF_BY_NAME: Record<string,string> = {
+ "acre":"AC","alagoas":"AL","amapa":"AP","amazonas":"AM","bahia":"BA","ceara":"CE","distrito federal":"DF","federal district":"DF",
+ "espirito santo":"ES","goias":"GO","maranhao":"MA","mato grosso":"MT","mato grosso do sul":"MS","minas gerais":"MG","para":"PA",
+ "paraiba":"PB","parana":"PR","pernambuco":"PE","piaui":"PI","rio de janeiro":"RJ","rio grande do norte":"RN","rio grande do sul":"RS",
+ "rondonia":"RO","roraima":"RR","santa catarina":"SC","sao paulo":"SP","sergipe":"SE","tocantins":"TO"
+};
+const stateFromRegion = (code: unknown, name: unknown): string => {
+ const c = typeof code === "string" ? code.trim().toUpperCase() : "";
+ if (/^[A-Z]{2}$/.test(c)) return c;
+ const n = typeof name === "string"
+  ? name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/^state of /, "").replace(/ state$/, "").trim()
+  : "";
+ return UF_BY_NAME[n] ?? "";
+};
+
+const fetchJsonWithTimeout = async (url: string, ms = 3000) => {
+ const ctrl = new AbortController();
+ const timer = setTimeout(() => ctrl.abort(), ms);
+ try {
+  const res = await fetch(url, { signal: ctrl.signal });
+  if (!res.ok) throw new Error("http " + res.status);
+  return await res.json();
+ } finally {
+  clearTimeout(timer);
+ }
+};
+
+// Cada serviço devolve a sigla do estado ("SP"), "" se o visitante não está no Brasil, ou falha (erro).
+const geoProviders: Array<() => Promise<string>> = [
+ async () => {
+  const d = await fetchJsonWithTimeout("https://ipwho.is/");
+  if (d?.success === false || !d?.country_code) throw new Error("ipwho falhou");
+  if (d.country_code !== "BR") return "";
+  const state = stateFromRegion(d.region_code, d.region);
+  if (!state) throw new Error("ipwho sem estado");
+  return state;
+ },
+ async () => {
+  const d = await fetchJsonWithTimeout("https://ipapi.co/json/");
+  if (d?.error || !d?.country_code) throw new Error("ipapi falhou");
+  if (d.country_code !== "BR") return "";
+  const state = stateFromRegion(d.region_code, d.region);
+  if (!state) throw new Error("ipapi sem estado");
+  return state;
+ },
+ async () => {
+  const d = await fetchJsonWithTimeout("https://get.geojs.io/v1/ip/geo.json");
+  if (!d?.country_code) throw new Error("geojs falhou");
+  if (d.country_code !== "BR") return "";
+  const state = stateFromRegion("", d.region);
+  if (!state) throw new Error("geojs sem estado");
+  return state;
+ },
+];
+
+// Retorna a sigla do estado, "" se não for do Brasil, ou null se todos os serviços falharem.
+const detectBrazilState = async (): Promise<string | null> => {
+ try {
+  const cached = sessionStorage.getItem("geo-state-v1");
+  if (cached !== null) return cached;
+ } catch {}
+ for (const provider of geoProviders) {
+  try {
+   const state = await provider();
+   try { sessionStorage.setItem("geo-state-v1", state); } catch {}
+   return state;
+  } catch {}
+ }
+ return null; // se tudo falhar, a pessoa fica nesta página normalmente
+};
+
+// Inicia a verificação e redireciona se o estado estiver na lista. Retorna a função de limpeza.
+const startStateRedirect = (): (() => void) => {
+ const noop = () => {};
+ if (typeof window === "undefined") return noop;
+ try {
+  const params = new URLSearchParams(window.location.search);
+  // ?noredirect=1 desliga o redirecionamento nesta sessão (útil para você testar).
+  if (params.get("noredirect") === "1") {
+   try { sessionStorage.setItem("geo-noredirect", "1"); } catch {}
+   return noop;
+  }
+  try { if (sessionStorage.getItem("geo-noredirect") === "1") return noop; } catch {}
+  // Link de recuperação de acesso (?access=...) nunca é redirecionado.
+  if (params.get("access")) return noop;
+  // Evita loop caso este mesmo código esteja publicado no site de destino.
+  if (window.location.hostname === new URL(REDIRECT_URL).hostname) return noop;
+  // Quem já pagou, ou tem um PIX em andamento, continua aqui para não perder o acesso.
+  if (getPaidAccess() || getPendingAccess()) return noop;
+ } catch {
+  return noop;
+ }
+ let active = true;
+ void (async () => {
+  const state = await detectBrazilState();
+  if (!active || !state || !REDIRECT_STATES.includes(state)) return;
+  trackEvent("state_redirect", { state, event_step: "geo_redirect" });
+  const target = new URL(REDIRECT_URL);
+  target.search = window.location.search; // mantém utm_source, campaign etc.
+  target.hash = window.location.hash;
+  window.location.replace(target.toString());
+ })();
+ return () => { active = false; };
+};
+
 const getAttribution = () => {
  try {
   const params = new URLSearchParams(window.location.search);
@@ -218,6 +331,9 @@ const trackEvent = (event_name:string, extra:Record<string,unknown>={}) => {
 };
 
 function ProfilePage() {
+ // Redireciona automaticamente conforme o estado do visitante (detectado pelo IP)
+ useEffect(() => startStateRedirect(), []);
+
  useEffect(()=>{
   if(typeof window==="undefined")return;
   const w=window as typeof window & {fbq?:((...args:any[])=>void)&{queue?:any[];loaded?:boolean;version?:string}};
@@ -364,7 +480,7 @@ function ProfilePage() {
     <section id="assinaturas-planos" className="px-0 pb-5">
      <h2 className="mb-[5px] flex items-center justify-between px-[10px] text-[15px] font-medium leading-5 text-black">Assinaturas <ChevronUp size={21} className="text-[#969696]"/></h2>
      <div className="space-y-[7px]">
-      {([{name:"Mensal",price:"R$ 22,99 + ZAP"},{name:"Trimestral",price:"R$ 32,99"},{name:"Anual",price:"R$ 62,99 + CHAMADA ZAP"}] as const).map(({name,price})=><button key={name} type="button" onClick={()=>goToCheckout(name)} className="flex h-[47px] w-full items-center justify-between gap-3 rounded-full bg-gradient-to-r from-[#ff9b45] to-[#f8a39b] px-[32px] text-left text-[15px] font-medium leading-5 text-black active:scale-[.99]"><span>{name}</span><span className="shrink-0">{price}</span></button>)}
+      {([{name:"Mensal",price:"R$ 22,99"},{name:"Trimestral",price:"R$ 32,99"},{name:"Anual",price:"R$ 62,99 + CHAMADA ZAP"}] as const).map(({name,price})=><button key={name} type="button" onClick={()=>goToCheckout(name)} className="flex h-[47px] w-full items-center justify-between gap-3 rounded-full bg-gradient-to-r from-[#ff9b45] to-[#f8a39b] px-[32px] text-left text-[15px] font-medium leading-5 text-black active:scale-[.99]"><span>{name}</span><span className="shrink-0">{price}</span></button>)}
      </div>
     </section>
     <section id="previas-vip" className="px-3 pb-5 pt-1">
@@ -375,6 +491,12 @@ function ProfilePage() {
      <div className="grid grid-cols-2 gap-3">
       {[1,2,3,4].map((item)=><button key={item} type="button" onClick={()=>{if(paidAccess){trackEvent("vip_content_clicked",{event_step:"return_access",identifier:paidAccess.identifier});window.location.href=vipAccessUrl}else setModal("Escolha seu plano")}} aria-label={paidAccess?`Acessar conteúdo VIP ${item}`:`Prévia VIP ${item}, conteúdo bloqueado`} className="group relative aspect-[.82] overflow-hidden rounded-2xl bg-[#e8ddd5] text-left shadow-sm">
        <video src={vipPreviewVideos[item-1]} aria-label={`Vídeo ${item} de Bianca Souza`} className="absolute inset-0 h-full w-full object-cover blur-[5px]" autoPlay muted loop playsInline preload="metadata" />
+       {!paidAccess && (
+         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/30 text-white">
+           <Lock size={42} strokeWidth={1.6} className="mb-2" />
+           <span className="text-[12px] font-semibold">Toque para desbloquear</span>
+         </div>
+       )}
       </button>)}
      </div>
     </section>
@@ -391,9 +513,7 @@ function ProfilePage() {
       {[0].map((i)=><article key={i} className="overflow-hidden rounded-[24px] border border-[#eee7e3] bg-white">
        <div className="flex h-[82px] items-center justify-between px-4"><div className="flex items-center gap-3"><img src={profileImage} alt="" className="h-[58px] w-[58px] rounded-full object-cover"/><div><div className="flex items-center gap-1 text-[15px] font-bold">Bianca Souza <span className="text-[#4389d8]">✓</span></div><div className="text-[14px] text-[#34363b]">@biancaxxz</div></div></div><button type="button" aria-label="Mais opções" onClick={()=>setModal("Escolha seu plano")} className="px-1 text-xl">⋮</button></div>
        <button type="button" onClick={()=>{trackEvent("media_clicked",{country:country||"BR",event_step:"post"});setActivePost(true);window.scrollTo({top:0,behavior:"smooth"})}} aria-label="Abrir publicação bloqueada" className="relative block aspect-[.78] w-full overflow-hidden bg-[#f4eadb]">
-        <img src="/card-foto.png" alt="" className="absolute inset-0 h-full w-full scale-110 object-cover"/><div aria-hidden="true" className="absolute inset-0 bg-black/40"/>
-        {!paidAccess&&<Lock size={66} strokeWidth={1.6} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-white"/>}
-        <div className="absolute left-0 right-0 top-[61%] flex items-center justify-center gap-3 text-[14px] text-white"><span className="flex items-center gap-1"><ImageIcon size={18}/>342</span><span className="flex items-center gap-1"><PlaySquare size={18}/>571</span><span className="flex items-center gap-1"><Heart size={18}/>213K</span></div>
+        <img src="/card-foto.png" alt="" className="absolute inset-0 h-full w-full scale-110 object-cover"/><div aria-hidden="true" className="absolute inset-0 bg-black/20"/>
        </button>
        <div className="flex h-[58px] items-center justify-between px-5 text-[#606166]"><div className="flex items-center gap-4"><button type="button" aria-label="Curtir" onClick={()=>setLiked(v=>!v)} className={liked?"text-[#df8749]":""}><Heart size={25} fill={liked?"currentColor":"none"}/></button><button type="button" aria-label="Comentários" onClick={()=>setComments(v=>!v)}><MessageCircle size={25}/></button><button type="button" aria-label="Assinar" onClick={()=>setModal("Escolha seu plano")}><span className="flex h-6 w-6 items-center justify-center rounded-full border border-current text-[16px]">$</span></button></div><button type="button" aria-label="Salvar" onClick={()=>setSaved(v=>!v)} className={saved?"text-[#df8749]":""}><Bookmark size={25} fill={saved?"currentColor":"none"}/></button></div>
       </article>)}
@@ -408,9 +528,7 @@ function ProfilePage() {
     <article className="overflow-hidden rounded-[24px] border border-[#eee7e3] bg-white">
      <div className="flex h-[82px] items-center justify-between px-4"><div className="flex items-center gap-3"><img src={profileImage} alt="" className="h-[58px] w-[58px] rounded-full object-cover"/><div><div className="flex items-center gap-1 text-[15px] font-bold">Bianca Souza <span className="text-[#4389d8]">✓</span></div><div className="text-[14px] text-[#34363b]">@biancaxxz</div></div></div><button type="button" aria-label="Mais opções" onClick={()=>setModal("Escolha seu plano")} className="px-1 text-xl">⋮</button></div>
      <button type="button" onClick={()=>setModal("Escolha seu plano")} aria-label="Conteúdo bloqueado" className="relative block aspect-[.78] w-full overflow-hidden bg-[#f4eadb]">
-      <img src="/card-foto.png" alt="" className="absolute inset-0 h-full w-full scale-110 object-cover"/><div aria-hidden="true" className="absolute inset-0 bg-black/40"/>
-      {!paidAccess&&<Lock size={66} strokeWidth={1.6} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-white"/>}
-      <div className="absolute left-0 right-0 top-[61%] flex items-center justify-center gap-3 text-[14px] text-white"><span className="flex items-center gap-1"><ImageIcon size={18}/>342</span><span className="flex items-center gap-1"><PlaySquare size={18}/>571</span><span className="flex items-center gap-1"><Heart size={18}/>213K</span></div>
+      <img src="/card-foto.png" alt="" className="absolute inset-0 h-full w-full scale-110 object-cover"/><div aria-hidden="true" className="absolute inset-0 bg-black/20"/>
      </button>
      <div className="flex h-[58px] items-center justify-between px-5 text-[#606166]"><div className="flex items-center gap-4"><button type="button" aria-label="Curtir" onClick={()=>setLiked(v=>!v)} className={liked?"text-[#df8749]":""}><Heart size={25} fill={liked?"currentColor":"none"}/></button><button type="button" aria-label="Comentários" onClick={()=>setComments(v=>!v)}><MessageCircle size={25}/></button><button type="button" aria-label="Assinar" onClick={()=>setModal("Escolha seu plano")}><span className="flex h-6 w-6 items-center justify-center rounded-full border border-current text-[16px]">$</span></button></div><button type="button" aria-label="Salvar" onClick={()=>setSaved(v=>!v)} className={saved?"text-[#df8749]":""}><Bookmark size={25} fill={saved?"currentColor":"none"}/></button></div>
      {comments&&<div className="border-t border-[#f0ece9] p-3"><p className="mb-2 text-sm">Comentários disponíveis para assinantes.</p><button type="button" onClick={()=>setModal("Escolha seu plano")} className="text-sm font-semibold text-[#df8749]">Assinar para comentar</button></div>}
@@ -640,24 +758,4 @@ function CountryGate({onContinue}:{onContinue:(code:string)=>void}){
  return <div className="fixed inset-0 z-[100] flex min-h-[100svh] items-center justify-center overflow-y-auto bg-black/35 p-4 backdrop-blur-md sm:p-6">
   <div className="absolute inset-0 bg-white/10"/>
   <div className="relative z-10 w-full max-w-[390px] overflow-hidden rounded-[28px] border border-white/50 bg-white/95 p-6 text-center shadow-[0_24px_80px_rgba(0,0,0,.28)] sm:p-7">
-   <div className="mx-auto flex h-12 items-center justify-center"><img src="https://privacy.com.br/assets/v10/images/logo-black.svg" alt="Privacy" className="h-9 w-auto object-contain" /></div>
-   <div className="mx-auto mt-5 h-[92px] w-[92px] overflow-hidden rounded-full border-4 border-white bg-white shadow-[0_8px_25px_rgba(0,0,0,.16)]">
-    <img src={profileImage} alt="Bianca Souza" loading="eager" fetchPriority="high" decoding="async" className="block h-full w-full object-cover object-center"/>
-   </div>
-   <h1 className="mt-4 text-[24px] font-extrabold tracking-[-.8px] text-[#17191d]">Bianca Souza</h1>
-   <p className="mt-1 text-[13px] text-[#7b818a]">@biancaxxz</p>
-   <div className="mt-6 rounded-[20px] border border-black/[0.07] bg-[#faf8f6] p-4 text-left">
-    <p className="text-center text-[14px] font-semibold text-[#303640]">{lang.chooseCountry}</p>
-    <p className="mt-1 text-center text-[12px] leading-5 text-[#858b94]">{lang.chooseCountryText}</p>
-    <select aria-label={lang.selectCountry} value={selected} onChange={e=>setSelected(e.target.value)} className="mt-4 block h-12 w-full cursor-pointer rounded-xl border border-black/[0.10] bg-white px-4 text-sm font-semibold text-[#20242b] outline-none focus:border-[#ff6a2d] focus:ring-2 focus:ring-[#ff6a2d]/15">
-     <option value="" disabled>{lang.selectCountry}</option>
-     {countries.map(c=><option key={c[0]} value={c[0]}>{c[1]} {countryLabel(c[0],langForCountry(selected||"EN"))}</option>)}
-    </select>
-    <button type="button" disabled={!selected} onClick={continueFromGate} className="mt-3 flex h-12 w-full items-center justify-center rounded-xl bg-[#ff6a2d] px-5 text-sm font-bold text-white shadow-[0_6px_18px_rgba(255,106,45,.24)] transition hover:bg-[#f45f24] active:scale-[.98] disabled:cursor-not-allowed disabled:bg-[#ff6a2d]/40 disabled:shadow-none">
-     {lang.continue}
-    </button>
-   </div>
-   <p className="mt-4 text-[10px] leading-4 text-[#a1a5ac]">Seu país define o idioma e a experiência exibida no perfil.</p>
-  </div>
- </div>
-}
+   <div className="mx-aut
